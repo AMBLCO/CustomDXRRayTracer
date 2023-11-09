@@ -33,7 +33,7 @@ namespace D3DResources
 	void Create_Texture(D3D12Global& d3d, D3D12Resources& resources, Material& material)
 	{
 		TextureInfo texture = Utils::LoadTexture(material.texturePath);
-		material.textureResolution = texture.width;
+		material.textureResolution = static_cast<float>(texture.width);
 
 		D3D12_RESOURCE_DESC textureDesc = {};
 		textureDesc.Width = texture.width;
@@ -41,7 +41,7 @@ namespace D3DResources
 		textureDesc.MipLevels = 1;
 		textureDesc.DepthOrArraySize = 1;
 		textureDesc.SampleDesc.Count = 1;
-		textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+		textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 		textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 		
 		HRESULT hr = d3d.device->CreateCommittedResource(&DefaultHeapProperties, D3D12_HEAP_FLAG_NONE, &textureDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&resources.texture));
@@ -77,7 +77,7 @@ namespace D3DResources
 		Create_Buffer(d3d, info, &resources.vertexBuffer);
 
 #if NAME_D3D_RESOURCES
-		resources.texture->SetName(L"Vertex Buffer");
+		resources.vertexBuffer->SetName(L"Vertex Buffer");
 #endif
 
 		UINT8* pVertexDataBegin;
@@ -99,7 +99,7 @@ namespace D3DResources
 		Create_Buffer(d3d, info, &resources.indexBuffer);
 
 #if NAME_D3D_RESOURCES
-		resources.texture->SetName(L"Index Buffer");
+		resources.indexBuffer->SetName(L"Index Buffer");
 #endif
 
 		UINT8* pIndexDataBegin;
@@ -112,7 +112,7 @@ namespace D3DResources
 
 		resources.indexBufferView.BufferLocation = resources.indexBuffer->GetGPUVirtualAddress();
 		resources.indexBufferView.SizeInBytes = static_cast<UINT>(info.size);
-		resources.indexBufferView.SizeInBytes = DXGI_FORMAT_R32_UINT;
+		resources.indexBufferView.Format = DXGI_FORMAT_R32_UINT;
 	}
 
 	void Create_Constant_Buffer(D3D12Global& d3d, ID3D12Resource** buffer, UINT64 size)
@@ -192,7 +192,43 @@ namespace D3DResources
 
 	void Update_View_CB(D3D12Global& d3d, D3D12Resources& resources)
 	{
+		const float rotationSpeed = 0.005f;
+		DirectX::XMMATRIX view, invView;
+		DirectX::XMFLOAT3 eye, focus, up;
+		float aspect, fov;
 
+		resources.eyeAngle.x += rotationSpeed;
+
+#if _DEBUG
+		float x = 2.f * cosf(resources.eyeAngle.x);
+		float y = 0.f;
+		float z = 2.25f + 2.f * sinf(resources.eyeAngle.x);
+
+		focus = DirectX::XMFLOAT3(0.f, 0.f, 0.f);
+#else
+		float x = 8.f * cosf(resources.eyeAngle.x);
+		float y = 1.5f + 1.5f * cosf(resources.eyeAngle.x);
+		float z = 8.f + 2.25f * sinf(resources.eyeAngle.x);
+
+		focus = DirectX::XMFLOAT3(0.f, 1.75f, 0.f);
+#endif
+
+		eye = DirectX::XMFLOAT3(x, y, z);
+		up = DirectX::XMFLOAT3(0.f, 1.f, 0.f);
+
+		aspect = (float)d3d.width / (float)d3d.height;
+		fov = 65.f * (DirectX::XM_PI / 180.f);
+
+		resources.rotationOffset += rotationSpeed;
+
+		view = DirectX::XMMatrixLookAtLH(DirectX::XMLoadFloat3(&eye), DirectX::XMLoadFloat3(&focus), DirectX::XMLoadFloat3(&up));
+		invView = DirectX::XMMatrixInverse(NULL, view);
+
+		resources.viewCBData.view = DirectX::XMMatrixTranspose(invView);
+		resources.viewCBData.viewOriginAndTanHalfFovY = DirectX::XMFLOAT4(eye.x, eye.y, eye.z, tanf(fov * 0.5f));
+		resources.viewCBData.resolution = DirectX::XMFLOAT2((float)d3d.width, (float)d3d.height);
+
+		memcpy(resources.viewCBStart, &resources.viewCBData, sizeof(resources.viewCBData));
 	}
 
 	void Upload_Texture(D3D12Global& d3d, ID3D12Resource* destResource, ID3D12Resource* srcResource, const TextureInfo& texture)
@@ -260,22 +296,76 @@ namespace D3DShaders
 {
 	void Init_Shader_Compiler(D3D12ShaderCompilerInfo& shaderCompiler)
 	{
+		HRESULT hr = shaderCompiler.DxcDllHelper.Initialize();
+		Utils::Validate(hr, L"Failed to initialize DxCDLLSupport");
 
+		hr = shaderCompiler.DxcDllHelper.CreateInstance(CLSID_DxcCompiler, &shaderCompiler.compiler);
+		Utils::Validate(hr, L"Failed to create DxcCompiler");
+
+		hr = shaderCompiler.DxcDllHelper.CreateInstance(CLSID_DxcLibrary, &shaderCompiler.library);
+		Utils::Validate(hr, L"Failed to create DxcLibrary");
 	}
 
 	void Compile_Shader(D3D12ShaderCompilerInfo& compilerInfo, RtProgram& program)
 	{
-
+		Compile_Shader(compilerInfo, program.info, &program.blob);
+		program.SetBytecode();
 	}
 
 	void Compile_Shader(D3D12ShaderCompilerInfo& compilerInfo, D3D12ShaderInfo& info, IDxcBlob** blob)
 	{
+		HRESULT hr;
+		UINT32 code(0);
+		IDxcBlobEncoding* pShaderText(nullptr);
 
+		hr = compilerInfo.library->CreateBlobFromFile(info.filename, &code, &pShaderText);
+		Utils::Validate(hr, L"Failed to create blob from shader file");
+
+		CComPtr<IDxcIncludeHandler> dxcIncludeHandler;
+		hr = compilerInfo.library->CreateIncludeHandler(&dxcIncludeHandler);
+		Utils::Validate(hr, L"Failed to create include handler");
+
+		IDxcOperationResult* result;
+		hr = compilerInfo.compiler->Compile(
+			pShaderText,
+			info.filename,
+			info.entryPoint,
+			info.targetProfile,
+			info.arguments,
+			info.argCount,
+			info.defines,
+			info.defineCount,
+			dxcIncludeHandler,
+			&result);
+		Utils::Validate(hr, L"Error: failed to compile shader");
+
+		result->GetStatus(&hr);
+		if (FAILED(hr))
+		{
+			IDxcBlobEncoding* error;
+			hr = result->GetErrorBuffer(&error);
+			Utils::Validate(hr, L"Error: failed to get shader compiler error buffer");
+
+			std::vector<char> infoLog(error->GetBufferSize() + 1);
+			memcpy(infoLog.data(), error->GetBufferPointer(), error->GetBufferSize());
+			infoLog[error->GetBufferSize()] = 0;
+
+			std::string errorMsg = "Shader Compiler Error:\n";
+			errorMsg.append(infoLog.data());
+
+			MessageBoxA(nullptr, errorMsg.c_str(), "Error", MB_OK);
+			return;
+		}
+
+		hr = result->GetResult(blob);
+		Utils::Validate(hr, L"Error: failed to get shader blob result");
 	}
 
 	void Destroy(D3D12ShaderCompilerInfo& shaderCompiler)
 	{
-
+		SAFE_RELEASE(shaderCompiler.compiler);
+		SAFE_RELEASE(shaderCompiler.library);
+		shaderCompiler.DxcDllHelper.Cleanup();
 	}
 }
 
