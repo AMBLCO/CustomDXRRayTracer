@@ -50,7 +50,6 @@ namespace D3DShaders
 namespace D3D12
 {
 	void Create_Device(D3D12Global& d3d);
-	void Create_CommandList(D3D12Global& d3d);
 	void Create_Command_Queue(D3D12Global& d3d);
 	void Create_Command_Allocator(D3D12Global& d3d);
 	void Create_CommandList(D3D12Global& d3d);

@@ -33,7 +33,7 @@ namespace D3DResources
 	void Create_Texture(D3D12Global& d3d, D3D12Resources& resources, Material& material)
 	{
 		TextureInfo texture = Utils::LoadTexture(material.texturePath);
-		material.textureResolution = static_cast<float>(texture.width);
+		material.textureResolution = texture.width;
 
 		D3D12_RESOURCE_DESC textureDesc = {};
 		textureDesc.Width = texture.width;
@@ -165,7 +165,7 @@ namespace D3DResources
 		resources.materialCB->SetName(L"Material Constant Buffer");
 #endif
 
-		resources.materialCBData.resolution = DirectX::XMFLOAT4(material.textureResolution, 0.f, 0.f, 0.f);
+		resources.materialCBData.resolution = DirectX::XMFLOAT4((float)material.textureResolution, 0.f, 0.f, 0.f);
 
 		HRESULT hr = resources.materialCB->Map(0, nullptr, reinterpret_cast<void**>(&resources.materialCBStart));
 		Utils::Validate(hr, L"Error: failed to map material constant buffer");
@@ -316,7 +316,7 @@ namespace D3DShaders
 	{
 		HRESULT hr;
 		UINT32 code(0);
-		IDxcBlobEncoding* pShaderText(nullptr);
+		IDxcBlobEncoding* pShaderText = nullptr;
 
 		hr = compilerInfo.library->CreateBlobFromFile(info.filename, &code, &pShaderText);
 		Utils::Validate(hr, L"Failed to create blob from shader file");
@@ -373,72 +373,228 @@ namespace D3D12
 {
 	void Create_Device(D3D12Global& d3d)
 	{
+#if defined(_DEBUG)
+		{
+			ID3D12Debug* debugController;
+			if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
+			{
+				debugController->EnableDebugLayer();
+			}
+		}
+#endif
 
-	}
+		HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&d3d.factory));
+		Utils::Validate(hr, L"Error: failed to create DXGI factory");
 
-	void Create_CommandList(D3D12Global& d3d)
-	{
+		d3d.adapter = nullptr;
+		for (UINT adapterIndex = 0; DXGI_ERROR_NOT_FOUND != d3d.factory->EnumAdapters1(adapterIndex, &d3d.adapter); ++adapterIndex)
+		{
+			DXGI_ADAPTER_DESC1 adapterDesc;
+			d3d.adapter->GetDesc1(&adapterDesc);
 
+			if (adapterDesc.Flags & DXGI_ADAPTER_FLAG3_SOFTWARE)
+			{
+				continue;
+			}
+
+			if (SUCCEEDED(D3D12CreateDevice(d3d.adapter, D3D_FEATURE_LEVEL_12_1, __uuidof(ID3D12Device5), (void**)&d3d.device)))
+			{
+				D3D12_FEATURE_DATA_D3D12_OPTIONS5 features = {};
+				HRESULT hr = d3d.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &features, sizeof(features));
+				if (FAILED(hr) || features.RaytracingTier < D3D12_RAYTRACING_TIER_1_0)
+				{
+					SAFE_RELEASE(d3d.device);
+					d3d.device = nullptr;
+					continue;
+				}
+
+#if NAME_D3D_RESOURCES
+				d3d.device->SetName(L"DXR Enanbled Device");
+				printf("Running on DXGI Adapter %S\n", adapterDesc.Description);
+#endif
+				break;
+			}
+
+			if (d3d.device == nullptr)
+			{
+				Utils::Validate(E_FAIL, L"Error: failed to create ray tracing device");
+			}
+		}
 	}
 
 	void Create_Command_Queue(D3D12Global& d3d)
 	{
+		D3D12_COMMAND_QUEUE_DESC desc = {};
+		desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+		desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
+		HRESULT hr = d3d.device->CreateCommandQueue(&desc, IID_PPV_ARGS(&d3d.cmdQueue));
+		Utils::Validate(hr, L"Error: failed to create command queue");
+
+#if NAME_D3D_RESOURCES
+		d3d.cmdQueue->SetName(L"D3D12 Command Queue");
+#endif
 	}
 
 	void Create_Command_Allocator(D3D12Global& d3d)
 	{
+		for (UINT n = 0; n < 2; n++)
+		{
+			HRESULT hr = d3d.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&d3d.cmdAlloc[n]));
+			Utils::Validate(hr, L"Error: failed to create the command alllocator");
 
+#if NAME_D3D_RESOURCES
+			d3d.cmdQueue->SetName(L"D3D12 Command Allocator" + n);
+#endif
+		}
 	}
 
 	void Create_CommandList(D3D12Global& d3d)
 	{
+		HRESULT hr = d3d.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, d3d.cmdAlloc[d3d.frameIndex], nullptr, IID_PPV_ARGS(&d3d.cmdList));
+		hr = d3d.cmdList->Close();
+		Utils::Validate(hr, L"Error: failed ot create the command list");
 
+#if NAME_D3D_RESOURCES
+		d3d.cmdList->SetName(L"D3D12 Command List");
+#endif
 	}
 
 	void Create_Fence(D3D12Global& d3d)
 	{
+		HRESULT hr = d3d.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&d3d.fence));
+		Utils::Validate(hr, L"Error: failed to create fence");
 
+#if NAME_D3D_RESOURCES
+		d3d.fence->SetName(L"D3D12 Fence");
+#endif
+
+		d3d.fenceValues[d3d.frameIndex]++;
+
+		d3d.fenceEvent = CreateEventEx(nullptr, FALSE, FALSE, EVENT_ALL_ACCESS);
+		if (d3d.fenceEvent == nullptr)
+		{
+			hr = HRESULT_FROM_WIN32(GetLastError());
+			Utils::Validate(hr, L"Error: failed to create fence event");
+		}
 	}
 
 	void Create_SwapChain(D3D12Global& d3d, HWND& window)
 	{
+		DXGI_SWAP_CHAIN_DESC1 desc = {};
+		desc.BufferCount = 2;
+		desc.Width = d3d.width;
+		desc.Height = d3d.height;
+		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+		desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+		desc.SampleDesc.Count = 1;
 
+		IDXGISwapChain1* swapChain;
+		HRESULT hr = d3d.factory->CreateSwapChainForHwnd(d3d.cmdQueue, window, &desc, nullptr, nullptr, &swapChain);
+		Utils::Validate(hr, L"Error: failed to create swap chain");
+
+		hr = d3d.factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
+		Utils::Validate(hr, L"Error: failed to make window association");
+
+		hr = swapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&d3d.swapChain));
+		Utils::Validate(hr, L"Error: failed to cast swap chain");
+
+		SAFE_RELEASE(swapChain);
+		d3d.frameIndex = d3d.swapChain->GetCurrentBackBufferIndex();
 	}
 
 	ID3D12RootSignature* Create_Root_Signature(D3D12Global& d3d, const D3D12_ROOT_SIGNATURE_DESC& desc)
 	{
+		ID3DBlob* sig;
+		ID3DBlob* error;
+		HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &error);
+		Utils::Validate(hr, L"Error: failed to serialize root signature");
 
+		ID3D12RootSignature* pRootSig;
+		hr = d3d.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&pRootSig));
+		Utils::Validate(hr, L"Error: failed to create root signature");
+
+		SAFE_RELEASE(sig);
+		SAFE_RELEASE(error);
+		
+		return pRootSig;
 	}
 
 	void Reset_CommandList(D3D12Global& d3d)
 	{
+		HRESULT hr = d3d.cmdAlloc[d3d.frameIndex]->Reset();
+		Utils::Validate(hr, L"Error: failed to reset command allocator");
 
+		hr = d3d.cmdList->Reset(d3d.cmdAlloc[d3d.frameIndex], nullptr);
+		Utils::Validate(hr, L"Error: failed to reset command list");
 	}
 
 	void Submit_CmdList(D3D12Global& d3d)
 	{
+		d3d.cmdList->Close();
 
+		ID3D12CommandList* pGraphicsList = { d3d.cmdList };
+		d3d.cmdQueue->ExecuteCommandLists(1, &pGraphicsList);
+		d3d.fenceValues[d3d.frameIndex]++;
+		d3d.cmdQueue->Signal(d3d.fence, d3d.fenceValues[d3d.frameIndex]);
 	}
 
 	void Present(D3D12Global& d3d)
 	{
-
+		HRESULT hr = d3d.swapChain->Present(d3d.vsync, 0);
+		if (FAILED(hr))
+		{
+			hr = d3d.device->GetDeviceRemovedReason();
+			Utils::Validate(hr, L"Error: failed to present");
+		}
 	}
 
 	void WaitForGPU(D3D12Global& d3d)
 	{
+		HRESULT hr = d3d.cmdQueue->Signal(d3d.fence, d3d.fenceValues[d3d.frameIndex]);
+		Utils::Validate(hr, L"Error: failed to signal fence");
 
+		hr = d3d.fence->SetEventOnCompletion(d3d.fenceValues[d3d.frameIndex], d3d.fenceEvent);
+		Utils::Validate(hr, L"Error: failed to set fence event");
+
+		WaitForSingleObjectEx(d3d.fenceEvent, INFINITE, FALSE);
+
+		d3d.fenceValues[d3d.frameIndex]++;
 	}
 
 	void MoveToNextFrame(D3D12Global& d3d)
 	{
+		const UINT64 currentFenceValue = d3d.fenceValues[d3d.frameIndex];
+		HRESULT hr = d3d.cmdQueue->Signal(d3d.fence, currentFenceValue);
+		Utils::Validate(hr, L"Error: failed to signal command queue");
 
+		d3d.frameIndex = d3d.swapChain->GetCurrentBackBufferIndex();
+
+		if (d3d.fence->GetCompletedValue() < d3d.fenceValues[d3d.frameIndex])
+		{
+			hr = d3d.fence->SetEventOnCompletion(d3d.fenceValues[d3d.frameIndex], d3d.fenceEvent);
+			Utils::Validate(hr, L"Error: failed to set fence value");
+
+			WaitForSingleObjectEx(d3d.fenceEvent, INFINITE, FALSE);
+		}
+
+		d3d.fenceValues[d3d.frameIndex] = currentFenceValue + 1;
 	}
 
 	void Destroy(D3D12Global& d3d)
 	{
-
+		SAFE_RELEASE(d3d.fence);
+		SAFE_RELEASE(d3d.backBuffer[0]);
+		SAFE_RELEASE(d3d.backBuffer[1]);
+		SAFE_RELEASE(d3d.swapChain);
+		SAFE_RELEASE(d3d.cmdAlloc[0]);
+		SAFE_RELEASE(d3d.cmdAlloc[1]);
+		SAFE_RELEASE(d3d.cmdQueue);
+		SAFE_RELEASE(d3d.cmdList);
+		SAFE_RELEASE(d3d.device);
+		SAFE_RELEASE(d3d.adapter);
+		SAFE_RELEASE(d3d.factory);
 	}
 }
 
@@ -446,12 +602,134 @@ namespace DXR
 {
 	void Create_Bottom_Level_AS(D3D12Global& d3d, DXRGlobal& dxr, D3D12Resources& resources, Model& model)
 	{
+		D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc;
+		geometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+		geometryDesc.Triangles.VertexBuffer.StartAddress = resources.vertexBuffer->GetGPUVirtualAddress();
+		geometryDesc.Triangles.VertexBuffer.StrideInBytes = resources.vertexBufferView.StrideInBytes;
+		geometryDesc.Triangles.VertexCount = static_cast<UINT>(model.vertices.size());
+		geometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+		geometryDesc.Triangles.IndexBuffer = resources.indexBuffer->GetGPUVirtualAddress();
+		geometryDesc.Triangles.IndexFormat = resources.indexBufferView.Format;
+		geometryDesc.Triangles.IndexCount = static_cast<UINT>(model.indices.size());
+		geometryDesc.Triangles.Transform3x4 = 0;
+		geometryDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
 
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS buildFlags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+
+		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS ASInputs = {};
+		ASInputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+		ASInputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+		ASInputs.pGeometryDescs = &geometryDesc;
+		ASInputs.NumDescs = 1;
+		ASInputs.Flags = buildFlags;
+
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO ASPreBuildInfo = {};
+		d3d.device->GetRaytracingAccelerationStructurePrebuildInfo(&ASInputs, &ASPreBuildInfo);
+
+		ASPreBuildInfo.ScratchDataSizeInBytes = ALIGN(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT, ASPreBuildInfo.ScratchDataSizeInBytes);
+		ASPreBuildInfo.ResultDataMaxSizeInBytes = ALIGN(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT, ASPreBuildInfo.ResultDataMaxSizeInBytes);
+
+		D3D12BufferCreateInfo bufferInfo(ASPreBuildInfo.ScratchDataSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		bufferInfo.alignment = max(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+		D3DResources::Create_Buffer(d3d, bufferInfo, &dxr.BLAS.pScratch);
+
+#if NAME_D3D_RESOURCES
+		dxr.BLAS.pScratch->SetName(L"DXR BLAS Scratch");
+#endif
+
+		bufferInfo.size = ASPreBuildInfo.ResultDataMaxSizeInBytes;
+		bufferInfo.state = D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+		D3DResources::Create_Buffer(d3d, bufferInfo, &dxr.BLAS.pResult);
+
+#if NAME_D3D_RESOURCES
+		dxr.BLAS.pResult->SetName(L"DXR BLAS");
+#endif
+
+		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc = {};
+		buildDesc.Inputs = ASInputs;
+		buildDesc.ScratchAccelerationStructureData = dxr.BLAS.pScratch->GetGPUVirtualAddress();
+		buildDesc.DestAccelerationStructureData = dxr.BLAS.pResult->GetGPUVirtualAddress();
+
+		d3d.cmdList->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+		D3D12_RESOURCE_BARRIER uavBarrier;
+		uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+		uavBarrier.UAV.pResource = dxr.BLAS.pResult;
+		uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+		d3d.cmdList->ResourceBarrier(1, &uavBarrier);
 	}
 
 	void Create_Top_Level_AS(D3D12Global& d3d, DXRGlobal& dxr, D3D12Resources& resources)
 	{
+		D3D12_RAYTRACING_INSTANCE_DESC instanceDesc = {};
+		instanceDesc.InstanceID = 0;
+		instanceDesc.InstanceContributionToHitGroupIndex = 0;
+		instanceDesc.InstanceMask = 0xFF;
+		instanceDesc.Transform[0][0] = instanceDesc.Transform[1][1] = instanceDesc.Transform[2][2] = 0;
+		instanceDesc.AccelerationStructure = dxr.BLAS.pResult->GetGPUVirtualAddress();
+		instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE;
 
+		D3D12BufferCreateInfo instanceBufferInfo;
+		instanceBufferInfo.size = sizeof(instanceDesc);
+		instanceBufferInfo.heapType = D3D12_HEAP_TYPE_UPLOAD;
+		instanceBufferInfo.flags = D3D12_RESOURCE_FLAG_NONE;
+		instanceBufferInfo.state = D3D12_RESOURCE_STATE_GENERIC_READ;
+		D3DResources::Create_Buffer(d3d, instanceBufferInfo, &dxr.TLAS.pInstanceDesc);
+
+#if NAME_D3D_RESOURCES
+		dxr.TLAS.pInstanceDesc->SetName(L"DXR TLAS Instance Descriptors");
+#endif
+
+		UINT8* pData;
+		dxr.TLAS.pInstanceDesc->Map(0, nullptr, (void**)&pData);
+		memcpy(pData, &instanceDesc, sizeof(instanceDesc));
+		dxr.TLAS.pInstanceDesc->Unmap(0, nullptr);
+
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS buildFlags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+
+		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS ASInputs = {};
+		ASInputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+		ASInputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+		ASInputs.InstanceDescs = dxr.TLAS.pInstanceDesc->GetGPUVirtualAddress();
+		ASInputs.NumDescs = 1;
+		ASInputs.Flags = buildFlags;
+
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO ASPreBuildInfo = {};
+		d3d.device->GetRaytracingAccelerationStructurePrebuildInfo(&ASInputs, &ASPreBuildInfo);
+
+		ASPreBuildInfo.ScratchDataSizeInBytes = ALIGN(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT, ASPreBuildInfo.ScratchDataSizeInBytes);
+		ASPreBuildInfo.ResultDataMaxSizeInBytes = ALIGN(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT, ASPreBuildInfo.ResultDataMaxSizeInBytes);
+
+		dxr.tlasSize = ASPreBuildInfo.ResultDataMaxSizeInBytes;
+
+		D3D12BufferCreateInfo bufferInfo(ASPreBuildInfo.ScratchDataSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		bufferInfo.alignment = max(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT);
+		D3DResources::Create_Buffer(d3d, bufferInfo, &dxr.TLAS.pScratch);
+
+#if NAME_D3D_RESOURCES
+		dxr.TLAS.pScratch->SetName(L"DXR TLAS Scratch");
+#endif
+
+		bufferInfo.size = ASPreBuildInfo.ResultDataMaxSizeInBytes;
+		bufferInfo.state = D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+		D3DResources::Create_Buffer(d3d, bufferInfo, &dxr.TLAS.pResult);
+
+#if NAME_D3D_RESOURCES
+		dxr.TLAS.pResult->SetName(L"DXR TLAS");
+#endif
+
+		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc = {};
+		buildDesc.Inputs = ASInputs;
+		buildDesc.ScratchAccelerationStructureData = dxr.TLAS.pScratch->GetGPUVirtualAddress();
+		buildDesc.DestAccelerationStructureData = dxr.TLAS.pResult->GetGPUVirtualAddress();
+
+		d3d.cmdList->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+		D3D12_RESOURCE_BARRIER uavBarrier;
+		uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+		uavBarrier.UAV.pResource = dxr.TLAS.pResult;
+		uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+		d3d.cmdList->ResourceBarrier(1, &uavBarrier);
 	}
 
 	void Create_RayGen_Program(D3D12Global& d3d, DXRGlobal& dxr, D3D12ShaderCompilerInfo& shaderCompiler)

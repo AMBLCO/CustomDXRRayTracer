@@ -56,7 +56,7 @@ public:
   DxcDllSupport() : m_dll(nullptr), m_createFn(nullptr), m_createFn2(nullptr) {
   }
 
-  DxcDllSupport(DxcDllSupport&& other) {
+  DxcDllSupport(DxcDllSupport&& other) noexcept {
     m_dll = other.m_dll; other.m_dll = nullptr;
     m_createFn = other.m_createFn; other.m_createFn = nullptr;
     m_createFn2 = other.m_createFn2; other.m_createFn2 = nullptr;

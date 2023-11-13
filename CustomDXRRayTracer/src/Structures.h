@@ -207,6 +207,8 @@ struct RtProgram
 	RtProgram()
 	{
 		exportDesc.ExportToRename = nullptr;
+		dxilLibDesc = {};
+		subobject = {};
 	}
 
 	RtProgram(D3D12ShaderInfo shaderInfo)
