@@ -970,21 +970,174 @@ namespace DXR
 
 	void Create_Descriptor_Heaps(D3D12Global& d3d, DXRGlobal& dxr, D3D12Resources& resources, const Model& model)
 	{
+		D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+		desc.NumDescriptors = 7;
+		desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+		desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
+		HRESULT hr = d3d.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&resources.descriptorHeap));
+		Utils::Validate(hr, L"Error: failed to create DXR CBV/SRV/UAV descriptor heap");
+
+		D3D12_CPU_DESCRIPTOR_HANDLE handle = resources.descriptorHeap->GetCPUDescriptorHandleForHeapStart();
+		UINT handleIncrement = d3d.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+#if NAME_D3D_RESOURCES
+		resources.descriptorHeap->SetName(L"DXR Descriptor Heap");
+#endif
+
+		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+		cbvDesc.SizeInBytes = ALIGN(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, sizeof(resources.viewCBData));
+		cbvDesc.BufferLocation = resources.viewCB->GetGPUVirtualAddress();
+
+		d3d.device->CreateConstantBufferView(&cbvDesc, handle);
+
+		cbvDesc.SizeInBytes = ALIGN(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, sizeof(resources.materialCBData));
+		cbvDesc.BufferLocation = resources.materialCB->GetGPUVirtualAddress();
+
+		handle.ptr += handleIncrement;
+		d3d.device->CreateConstantBufferView(&cbvDesc, handle);
+
+		D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+		uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+		handle.ptr += handleIncrement;
+		d3d.device->CreateUnorderedAccessView(resources.DXROutput, nullptr, &uavDesc, handle);
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.RaytracingAccelerationStructure.Location = dxr.TLAS.pResult->GetGPUVirtualAddress();
+
+		handle.ptr += handleIncrement;
+		d3d.device->CreateShaderResourceView(nullptr, &srvDesc, handle);
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC indexSRVDesc = {};
+		indexSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		indexSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		indexSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		indexSRVDesc.Buffer.StructureByteStride = 0;
+		indexSRVDesc.Buffer.FirstElement = 0;
+		indexSRVDesc.Buffer.NumElements = (static_cast<UINT>(model.indices.size()) * sizeof(UINT)) / sizeof(float);
+		indexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+		handle.ptr += handleIncrement;
+		d3d.device->CreateShaderResourceView(resources.indexBuffer, &indexSRVDesc, handle);
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC vertexSRVDesc = {};
+		vertexSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		vertexSRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+		vertexSRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+		vertexSRVDesc.Buffer.StructureByteStride = 0;
+		vertexSRVDesc.Buffer.FirstElement = 0;
+		vertexSRVDesc.Buffer.NumElements = (static_cast<UINT>(model.vertices.size()) * sizeof(Vertex)) / sizeof(float);
+		vertexSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+		handle.ptr += handleIncrement;
+		d3d.device->CreateShaderResourceView(resources.vertexBuffer, &vertexSRVDesc, handle);
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC textureSRVDesc = {};
+		textureSRVDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		textureSRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		textureSRVDesc.Texture2D.MipLevels = 1;
+		textureSRVDesc.Texture2D.MostDetailedMip = 0;
+		textureSRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+		handle.ptr += handleIncrement;
+		d3d.device->CreateShaderResourceView(resources.texture, &textureSRVDesc, handle);
 	}
 
 	void Create_DXR_Output(D3D12Global& d3d, D3D12Resources& resources)
 	{
+		D3D12_RESOURCE_DESC desc = {};
+		desc.DepthOrArraySize = 1;
+		desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+		desc.Width = d3d.width;
+		desc.Height = d3d.height;
+		desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+		desc.MipLevels = 1;
+		desc.SampleDesc.Count = 1;
+		desc.SampleDesc.Quality = 0;
 
+		HRESULT hr = d3d.device->CreateCommittedResource(&DefaultHeapProperties, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr, IID_PPV_ARGS(&resources.DXROutput));
+		Utils::Validate(hr, L"Error: faield to create DXR output buffer");
+
+#if NAME_D3D_RESOURCES
+		resources.DXROutput->SetName(L"DXR Output Buffer");
+#endif
 	}
 
 	void Build_Command_List(D3D12Global& d3d, DXRGlobal& dxr, D3D12Resources& resources)
 	{
+		D3D12_RESOURCE_BARRIER outputBarriers[2] = {};
+		//D3D12_RESOURCE_BARRIER counterBarriers[2] = {};
+		//D3D12_RESOURCE_BARRIER uavBarriers[3] = {};
 
+		outputBarriers[0].Transition.pResource = d3d.backBuffer[d3d.frameIndex];
+		outputBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+		outputBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+		outputBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+		outputBarriers[1].Transition.pResource = resources.DXROutput;
+		outputBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+		outputBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		outputBarriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+		d3d.cmdList->ResourceBarrier(2, outputBarriers);
+
+		ID3D12DescriptorHeap* ppHeaps[] = { resources.descriptorHeap };
+		d3d.cmdList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
+
+		D3D12_DISPATCH_RAYS_DESC desc = {};
+		desc.RayGenerationShaderRecord.StartAddress = dxr.shaderTable->GetGPUVirtualAddress();
+		desc.RayGenerationShaderRecord.SizeInBytes = dxr.shaderTableRecordSize;
+
+		desc.MissShaderTable.StartAddress = dxr.shaderTable->GetGPUVirtualAddress() + dxr.shaderTableRecordSize;
+		desc.MissShaderTable.SizeInBytes = dxr.shaderTableRecordSize;
+		desc.MissShaderTable.StrideInBytes = dxr.shaderTableRecordSize;
+
+		desc.HitGroupTable.StartAddress = dxr.shaderTable->GetGPUVirtualAddress() + dxr.shaderTableRecordSize * 2;
+		desc.HitGroupTable.SizeInBytes = dxr.shaderTableRecordSize;
+		desc.HitGroupTable.StrideInBytes = dxr.shaderTableRecordSize;
+
+		desc.Width = d3d.width;
+		desc.Height = d3d.height;
+		desc.Depth = 1;
+
+		d3d.cmdList->SetPipelineState1(dxr.rtpso);
+		d3d.cmdList->DispatchRays(&desc);
+
+		outputBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+		outputBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+
+		d3d.cmdList->ResourceBarrier(1, &outputBarriers[1]);
+
+		d3d.cmdList->CopyResource(d3d.backBuffer[d3d.frameIndex], resources.DXROutput);
+
+		outputBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+		outputBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+
+		d3d.cmdList->ResourceBarrier(1, &outputBarriers[0]);
+
+		D3D12::Submit_CmdList(d3d);
+		D3D12::WaitForGPU(d3d);
 	}
 
 	void Destroy(DXRGlobal& dxr)
 	{
-
+		SAFE_RELEASE(dxr.TLAS.pScratch);
+		SAFE_RELEASE(dxr.TLAS.pResult);
+		SAFE_RELEASE(dxr.TLAS.pInstanceDesc);
+		SAFE_RELEASE(dxr.BLAS.pScratch);
+		SAFE_RELEASE(dxr.BLAS.pResult);
+		SAFE_RELEASE(dxr.BLAS.pInstanceDesc);
+		SAFE_RELEASE(dxr.rgs.blob);
+		SAFE_RELEASE(dxr.rgs.pRootSignature);
+		SAFE_RELEASE(dxr.miss.blob);
+		SAFE_RELEASE(dxr.hit.chs.blob);
+		SAFE_RELEASE(dxr.rtpso);
+		SAFE_RELEASE(dxr.rtpsoInfo);
 	}
 }
